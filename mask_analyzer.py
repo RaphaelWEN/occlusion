@@ -6,7 +6,6 @@ of masks along their principal axis.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 import cv2
 import numpy as np
@@ -22,6 +21,7 @@ class MaskInfo:
     class_id: int
     class_name: str
     confidence: float
+    source_index: int
     # centroid in pixel coords
     cx: float
     cy: float
@@ -88,6 +88,7 @@ def extract_mask_infos(
                 class_id=class_id,
                 class_name=class_names[class_id],
                 confidence=float(confidences[i]) if confidences is not None and i < len(confidences) else 1.0,
+                source_index=i,
                 cx=cx,
                 cy=cy,
                 x1=x1,
@@ -99,6 +100,41 @@ def extract_mask_infos(
             )
         )
     return infos
+
+
+def is_top_horizontal_display_mask(
+    mask_info: MaskInfo,
+    image_shape: tuple[int, int],
+    min_area_ratio: float = 0.035,
+    max_center_y_ratio: float = 0.28,
+    max_abs_orientation_deg: float = 30.0,
+) -> bool:
+    """Heuristic filter for large horizontal display signs above hanging products."""
+    h, w = image_shape[:2]
+    image_area = max(1, h * w)
+    area_ratio = mask_info.area_px / image_area
+    center_y_ratio = mask_info.cy / max(1, h)
+
+    return (
+        area_ratio >= min_area_ratio
+        and center_y_ratio <= max_center_y_ratio
+        and abs(mask_info.orientation_deg) <= max_abs_orientation_deg
+    )
+
+
+def filter_top_horizontal_display_masks(
+    masks: list[MaskInfo],
+    image_shape: tuple[int, int],
+) -> tuple[list[MaskInfo], list[MaskInfo]]:
+    """Remove display-board false positives before clustering/counting."""
+    kept: list[MaskInfo] = []
+    filtered: list[MaskInfo] = []
+    for mask_info in masks:
+        if is_top_horizontal_display_mask(mask_info, image_shape):
+            filtered.append(mask_info)
+        else:
+            kept.append(mask_info)
+    return kept, filtered
 
 
 def cluster_masks(

@@ -9,7 +9,7 @@ Example:
 from __future__ import annotations
 
 import argparse
-import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -18,8 +18,12 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from occlusion.config import (
     DEFAULT_CONF,
+    DEFAULT_DATA_YAML,
     DEFAULT_DEVICE,
     DEFAULT_IMGSZ,
     DEFAULT_IOU,
@@ -30,9 +34,9 @@ from occlusion.config import (
 )
 from occlusion.depth_estimator import DepthEstimator
 from occlusion.fusion_counter import count_all_clusters, summarize_counts
-from occlusion.mask_analyzer import cluster_masks, extract_mask_infos
+from occlusion.label_convert import build_detection_polygon, polygon_to_points_list
+from occlusion.mask_analyzer import cluster_masks, extract_mask_infos, filter_top_horizontal_display_masks
 from occlusion.utils import (
-    build_data_yaml_seg,
     ensure_dir,
     load_class_names,
     load_image,
@@ -46,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Occlusion-aware counting inference")
     parser.add_argument("--source", type=Path, required=True, help="Directory or single image path")
     parser.add_argument("--weights", type=str, default=None, help="Path to YOLO-seg weights")
-    parser.add_argument("--data-yaml", type=Path, default=PROJECT_ROOT / "data.yaml")
+    parser.add_argument("--data-yaml", type=Path, default=DEFAULT_DATA_YAML)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--run-tag", type=str, default=None)
     parser.add_argument("--device", type=str, default=DEFAULT_DEVICE)
@@ -60,12 +64,52 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_input_path(path: Path) -> Path:
+    candidates: list[Path] = []
+    if path.is_absolute():
+        candidates.append(path)
+    else:
+        candidates.extend(
+            [
+                Path.cwd() / path,
+                PROJECT_ROOT / path,
+                PROJECT_ROOT.parent / path,
+            ]
+        )
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return candidates[0].resolve() if candidates else path.resolve()
+
+
 def _list_images(source: Path) -> list[Path]:
     if source.is_file():
         return [source]
     exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
     files = [p for p in source.rglob("*") if p.is_file() and p.suffix.lower() in exts]
     return sorted(files)
+
+
+def _serialize_instance(mask_info: Any, masks_np: np.ndarray, image_shape: tuple[int, int]) -> dict[str, Any]:
+    source_index = mask_info.source_index
+    mask = masks_np[source_index] if source_index < len(masks_np) else None
+    polygon, polygon_source = build_detection_polygon(
+        mask=mask,
+        bbox_xyxy=(mask_info.x1, mask_info.y1, mask_info.x2, mask_info.y2),
+        image_shape=image_shape,
+    )
+    return {
+        "class_id": mask_info.class_id,
+        "class_name": mask_info.class_name,
+        "confidence": mask_info.confidence,
+        "bbox": [mask_info.x1, mask_info.y1, mask_info.x2, mask_info.y2],
+        "polygon": polygon_to_points_list(polygon),
+        "polygon_source": polygon_source,
+        "area_px": mask_info.area_px,
+        "centroid": [mask_info.cx, mask_info.cy],
+        "orientation_deg": mask_info.orientation_deg,
+    }
 
 
 def run_single_image(
@@ -108,7 +152,17 @@ def run_single_image(
     class_ids = result.boxes.cls.cpu().numpy() if result.boxes is not None and result.boxes.cls is not None else np.array([])
     confidences = result.boxes.conf.cpu().numpy() if result.boxes is not None and result.boxes.conf is not None else None
 
+    image_shape = image_bgr.shape[:2]
     mask_infos = extract_mask_infos(masks_np, class_ids, class_names, confidences)
+    mask_infos, filtered_mask_infos = filter_top_horizontal_display_masks(mask_infos, image_shape)
+    instances = [_serialize_instance(mask_info, masks_np, image_shape) for mask_info in mask_infos]
+    filtered_instances = [
+        {
+            **_serialize_instance(mask_info, masks_np, image_shape),
+            "filter_reason": "top_horizontal_display_sign",
+        }
+        for mask_info in filtered_mask_infos
+    ]
     clusters = cluster_masks(mask_infos)
 
     # --- Depth estimation ---
@@ -129,6 +183,8 @@ def run_single_image(
 
     return {
         "summary": summary,
+        "instances": instances,
+        "filtered_instances": filtered_instances,
         "vis_image": vis_image,
         "clusters": clusters,
         "count_results": count_results,
@@ -137,7 +193,7 @@ def run_single_image(
 
 def main() -> None:
     args = parse_args()
-    source = Path(args.source)
+    source = _resolve_input_path(args.source)
     images = _list_images(source)
     if not images:
         raise RuntimeError(f"No images found in {source}")
@@ -147,7 +203,7 @@ def main() -> None:
     vis_dir = ensure_dir(out_dir / "visualizations")
     meta_dir = ensure_dir(out_dir / "meta")
 
-    class_names = load_class_names(args.data_yaml)
+    class_names = load_class_names(_resolve_input_path(args.data_yaml))
 
     # Load segmentation model
     weights_path = args.weights
@@ -158,6 +214,8 @@ def main() -> None:
             weights_path = str(candidates[-1])
         else:
             weights_path = str(DEFAULT_PRETRAINED_SEG)
+    else:
+        weights_path = str(_resolve_input_path(Path(weights_path)))
     print(f"[Seg model] Loading: {weights_path}")
     seg_model = YOLO(weights_path)
 
@@ -189,7 +247,12 @@ def main() -> None:
             max_det=args.max_det,
             device=str(args.device),
         )
-        all_summaries.append(out["summary"])
+        record = {
+            "summary": out["summary"],
+            "instances": out["instances"],
+            "filtered_instances": out["filtered_instances"],
+        }
+        all_summaries.append(record)
         save_image(vis_dir / img_path.name, out["vis_image"])
 
     # Save aggregated results

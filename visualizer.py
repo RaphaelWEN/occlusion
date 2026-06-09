@@ -5,9 +5,11 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 from occlusion.config import DEFAULT_FONT_SCALE, DEFAULT_LINE_WIDTH
 from occlusion.fusion_counter import CountResult
+from occlusion.label_convert import mask_to_polygon
 from occlusion.mask_analyzer import ClusterInfo, MaskInfo
 
 
@@ -26,6 +28,40 @@ def _palette(n: int) -> list[tuple[int, int, int]]:
     return [colors[i % len(colors)] for i in range(n)]
 
 
+def _get_label_font(font_scale: float) -> ImageFont.ImageFont:
+    size = max(12, int(round(font_scale * 32)))
+    for font_path in (
+        Path("C:/Windows/Fonts/msyh.ttc"),
+        Path("C:/Windows/Fonts/simhei.ttf"),
+        Path("C:/Windows/Fonts/simsun.ttc"),
+    ):
+        if font_path.exists():
+            return ImageFont.truetype(str(font_path), size=size)
+    return ImageFont.load_default()
+
+
+def _draw_text_label(
+    image: np.ndarray,
+    text: str,
+    origin: tuple[int, int],
+    bg_color: tuple[int, int, int],
+    font_scale: float,
+) -> np.ndarray:
+    font = _get_label_font(font_scale)
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    pil_image = Image.fromarray(rgb)
+    draw = ImageDraw.Draw(pil_image)
+
+    x, y = origin
+    bbox = draw.textbbox((x + 2, y + 2), text, font=font)
+    left, top, right, bottom = bbox
+    bg_rgb = (bg_color[2], bg_color[1], bg_color[0])
+    draw.rectangle((x, y, right + 4, bottom + 4), fill=bg_rgb)
+    draw.text((x + 2, y + 2), text, font=font, fill=(255, 255, 255))
+
+    return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+
+
 def draw_masks(
     image: np.ndarray,
     clusters: list[ClusterInfo],
@@ -41,10 +77,10 @@ def draw_masks(
         color = colors[cidx]
         for m in cluster.masks:
             overlay[m.mask] = color
-            contours, _ = cv2.findContours(
-                m.mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-            )
-            cv2.drawContours(vis, contours, -1, color, line_width)
+            polygon = mask_to_polygon(m.mask)
+            if polygon is not None:
+                contour = polygon.astype(np.int32).reshape(-1, 1, 2)
+                cv2.drawContours(vis, [contour], -1, color, line_width)
 
     vis = cv2.addWeighted(overlay, alpha, vis, 1 - alpha, 0)
     return vis
@@ -73,19 +109,8 @@ def draw_cluster_info(
         if result.occlusion_inferred > 0:
             label += f" +{result.occlusion_inferred} occluded"
 
-        # Draw background rectangle for text
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
-        cv2.rectangle(vis, (cx, cy - th - 6), (cx + tw + 4, cy + 4), color, -1)
-        cv2.putText(
-            vis,
-            label,
-            (cx + 2, cy - 4),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            font_scale,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
+        label_y = max(0, cy - int(round(font_scale * 36)))
+        vis = _draw_text_label(vis, label, (cx, label_y), color, font_scale)
 
         # Draw principal axis
         if cluster.masks:

@@ -34,7 +34,8 @@ from occlusion.config import (
 )
 from occlusion.depth_estimator import DepthEstimator
 from occlusion.fusion_counter import count_all_clusters, summarize_counts
-from occlusion.mask_analyzer import cluster_masks, extract_mask_infos
+from occlusion.label_convert import build_detection_polygon, polygon_to_points_list
+from occlusion.mask_analyzer import cluster_masks, extract_mask_infos, filter_top_horizontal_display_masks
 from occlusion.utils import load_class_names
 from occlusion.visualizer import compose_result_image
 
@@ -115,6 +116,27 @@ def _is_allowed_file(upload: UploadFile) -> bool:
     return suffix in {".jpg", ".jpeg", ".png"}
 
 
+def _serialize_instance(mask_info: Any, masks_np: np.ndarray, image_shape: tuple[int, int]) -> dict[str, Any]:
+    source_index = mask_info.source_index
+    mask = masks_np[source_index] if source_index < len(masks_np) else None
+    polygon, polygon_source = build_detection_polygon(
+        mask=mask,
+        bbox_xyxy=(mask_info.x1, mask_info.y1, mask_info.x2, mask_info.y2),
+        image_shape=image_shape,
+    )
+    return {
+        "class_id": mask_info.class_id,
+        "class_name": mask_info.class_name,
+        "confidence": mask_info.confidence,
+        "bbox": [mask_info.x1, mask_info.y1, mask_info.x2, mask_info.y2],
+        "polygon": polygon_to_points_list(polygon),
+        "polygon_source": polygon_source,
+        "area_px": mask_info.area_px,
+        "centroid": [mask_info.cx, mask_info.cy],
+        "orientation_deg": mask_info.orientation_deg,
+    }
+
+
 def _process_image(image_bgr: np.ndarray) -> dict[str, Any]:
     settings = get_settings()
     seg_model = get_seg_model()
@@ -144,7 +166,17 @@ def _process_image(image_bgr: np.ndarray) -> dict[str, Any]:
     class_ids = result.boxes.cls.cpu().numpy() if result.boxes is not None and result.boxes.cls is not None else np.array([])
     confidences = result.boxes.conf.cpu().numpy() if result.boxes is not None and result.boxes.conf is not None else None
 
+    image_shape = image_bgr.shape[:2]
     mask_infos = extract_mask_infos(masks_np, class_ids, class_names, confidences)
+    mask_infos, filtered_mask_infos = filter_top_horizontal_display_masks(mask_infos, image_shape)
+    instances = [_serialize_instance(mask_info, masks_np, image_shape) for mask_info in mask_infos]
+    filtered_instances = [
+        {
+            **_serialize_instance(mask_info, masks_np, image_shape),
+            "filter_reason": "top_horizontal_display_sign",
+        }
+        for mask_info in filtered_mask_infos
+    ]
     clusters = cluster_masks(mask_infos)
 
     depth_map = None
@@ -164,6 +196,8 @@ def _process_image(image_bgr: np.ndarray) -> dict[str, Any]:
 
     return {
         "summary": summary,
+        "instances": instances,
+        "filtered_instances": filtered_instances,
         "visualization_base64": vis_b64,
     }
 
@@ -213,6 +247,8 @@ async def analyze_endpoint(images: list[UploadFile] = File(...)) -> Any:
         payload_results.append({
             "filename": upload.filename,
             "summary": out["summary"],
+            "instances": out["instances"],
+            "filtered_instances": out["filtered_instances"],
             "visualization_base64": out["visualization_base64"],
         })
 

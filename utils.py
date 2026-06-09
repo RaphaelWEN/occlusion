@@ -12,7 +12,9 @@ import yaml
 
 def load_image(path: Path | str) -> np.ndarray:
     """Load an image as BGR (OpenCV default)."""
-    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    path = Path(path)
+    data = np.fromfile(path, dtype=np.uint8)
+    image = cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
     if image is None:
         raise FileNotFoundError(f"Failed to load image: {path}")
     return image
@@ -22,9 +24,12 @@ def save_image(path: Path | str, image: np.ndarray) -> None:
     """Save an image, creating parent directories if needed."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    ok = cv2.imwrite(str(path), image)
+    suffix = path.suffix.lower() or ".png"
+    ext = ".jpg" if suffix == ".jpeg" else suffix
+    ok, encoded = cv2.imencode(ext, image)
     if not ok:
-        raise RuntimeError(f"Failed to save image: {path}")
+        raise RuntimeError(f"Failed to encode image: {path}")
+    encoded.tofile(path)
 
 
 def load_class_names(data_yaml: Path | str) -> list[str]:
