@@ -1,44 +1,39 @@
-# Occlusion Counting
+# 遮挡商品识别与计数
 
-JOMOO product instance-segmentation and occlusion-aware counting pipeline.
+核心流程是训练 YOLO 分割模型，对单张图片或图片目录做推理，过滤常见的横向招牌误检，并输出商品数量、类别、置信度、边界框和多边形轮廓等结构化结果。
 
-The project trains a YOLO segmentation model for hanging retail products, runs
-single-image or batch inference, filters common display-board false positives,
-and returns both counting summaries and polygon-level instance metadata.
+## 功能
 
-## Features
+- 支持九牧商品自定义类别的 YOLO-seg 训练。
+- 支持单图和目录批量推理。
+- 支持 FastAPI 接口服务。
+- 支持中文类别名输出。
+- 输出实例级信息：类别、置信度、bbox、polygon、mask 面积、中心点、主方向角。
+- 对上方横向招牌误检做几何后处理过滤。
+- 支持可选的 Depth Anything V2 深度估计；也可以使用 `--skip-depth` 跳过深度，只按可见实例计数。
 
-- YOLO-seg training for custom JOMOO product classes.
-- Image and directory inference from the command line.
-- FastAPI service for count and analyze endpoints.
-- Chinese class-name output from YOLO-style `data.yaml`.
-- Polygon, bounding box, confidence, mask area, centroid, and orientation metadata.
-- Heuristic filtering for large horizontal display signs above hanging products.
-- Optional Depth Anything V2 based occlusion counting, with `--skip-depth` fallback.
-
-## Project Layout
+## 项目结构
 
 ```text
 occlusion/
-  api.py                  FastAPI service
-  config.py               Default paths and inference/training settings
-  depth_estimator.py      Depth Anything V2 wrapper
-  fusion_counter.py       Visible and occlusion-inferred count fusion
-  infer.py                CLI inference pipeline
-  label_convert.py        BBox, polygon, and mask conversion helpers
-  mask_analyzer.py        Mask geometry, clustering, and false-positive filters
-  prepare_seg_dataset.py  Convert YOLO bbox datasets to YOLO-seg labels
-  train_seg.py            YOLO-seg training entrypoint
-  utils.py                Image, YAML, JSON, and filesystem helpers
-  visualizer.py           Mask, label, and count visualization
+  api.py                  FastAPI 接口服务
+  config.py               默认路径和训练/推理参数
+  depth_estimator.py      Depth Anything V2 深度估计封装
+  fusion_counter.py       可见数量与遮挡推断数量融合
+  infer.py                命令行推理入口
+  label_convert.py        bbox、polygon、mask 转换工具
+  mask_analyzer.py        mask 几何分析、聚类和误检过滤
+  prepare_seg_dataset.py  YOLO bbox 数据集转 YOLO-seg 数据集
+  train_seg.py            YOLO-seg 训练入口
+  utils.py                图片、YAML、JSON 和目录工具
+  visualizer.py           mask、标签和计数结果可视化
 ```
 
-Data, model weights, runs, and output artifacts are intentionally ignored by
-Git. Keep them outside version control or provide them separately.
+数据集、模型权重、训练输出和推理输出不会提交到 Git 仓库，需要单独保存或传输。
 
-## Class Names
+## 类别配置
 
-The default dataset expects these classes:
+`data.yaml` 中的类别名应使用 UTF-8 编码，内容如下：
 
 ```yaml
 names:
@@ -58,21 +53,19 @@ names:
   13: 九牧健康编织软管
 ```
 
-## Environment
+## 环境安装
 
-Python 3.8+ is recommended. Install the runtime dependencies used by the
-pipeline:
+建议使用 Python 3.8 及以上版本。基础依赖：
 
 ```bash
 pip install ultralytics opencv-python numpy pyyaml scikit-learn pillow fastapi uvicorn python-multipart
 ```
 
-Install PyTorch according to your CUDA or CPU environment before running
-training or GPU inference.
+PyTorch 请根据本机 CUDA 或 CPU 环境单独安装。
 
-## Dataset
+## 数据集格式
 
-The default YOLO-seg dataset layout is:
+默认使用 YOLO-seg 数据集结构：
 
 ```text
 data_occlusion/
@@ -87,8 +80,7 @@ data_occlusion/
     test/
 ```
 
-If the source labels are YOLO bounding boxes, convert them to segmentation
-polygons first:
+如果原始标注是 YOLO bbox 格式，可以先转换成 YOLO-seg polygon：
 
 ```bash
 python -m occlusion.prepare_seg_dataset \
@@ -98,12 +90,11 @@ python -m occlusion.prepare_seg_dataset \
   --polygon-mode bbox
 ```
 
-For SAM-assisted polygon refinement, use `--polygon-mode sam` and provide the
-SAM checkpoint path.
+如果需要用 SAM 细化 polygon，可以使用 `--polygon-mode sam`，并传入 SAM checkpoint。
 
-## Training
+## 训练
 
-Run from the parent directory that contains the `occlusion` package:
+在包含 `occlusion` 包的父目录执行：
 
 ```bash
 python -m occlusion.train_seg \
@@ -115,7 +106,7 @@ python -m occlusion.train_seg \
   --name occlusion_seg
 ```
 
-Training artifacts are copied to:
+训练产物会整理到：
 
 ```text
 outputs/occlusion/occlusion/<run_tag>/
@@ -126,9 +117,9 @@ outputs/occlusion/occlusion/<run_tag>/
   meta/summary.json
 ```
 
-## Inference
+## 推理
 
-Run inference on one image:
+单张图片推理：
 
 ```bash
 python -m occlusion.infer \
@@ -139,7 +130,7 @@ python -m occlusion.infer \
   --skip-depth
 ```
 
-Run inference on a directory:
+目录批量推理：
 
 ```bash
 python -m occlusion.infer \
@@ -149,7 +140,7 @@ python -m occlusion.infer \
   --skip-depth
 ```
 
-Outputs are saved under:
+推理结果保存到：
 
 ```text
 outputs/occlusion/occlusion_infer/<run_tag>/
@@ -157,36 +148,37 @@ outputs/occlusion/occlusion_infer/<run_tag>/
   meta/results.json
 ```
 
-`results.json` contains:
+`results.json` 主要字段：
 
-- `summary`: total visible count, estimated total, inferred occlusion count, and cluster summaries.
-- `instances`: kept product detections used for clustering and counting.
-- `filtered_instances`: detections removed by post-processing filters.
+- `summary`：总可见数量、估计总数、遮挡推断数量和各聚类计数结果。
+- `instances`：参与计数的商品实例。
+- `filtered_instances`：被后处理过滤掉的实例。
 
-## Display Sign Filter
+## 横向招牌误检过滤
 
-Some images contain a large horizontal sign above the product hooks. If YOLO
-classifies that sign as a product, it is filtered before clustering and
-counting.
+部分门店图片中，上方横向招牌可能被模型误识别为商品。当前使用几何规则做后处理过滤，满足以下特征的实例会在计数前被移除：
 
-The current filter is geometry-based and removes detections that are:
+- mask 面积相对整图较大；
+- 中心点位于图片上方区域；
+- mask 主方向接近水平。
 
-- large relative to the image,
-- centered near the top of the image,
-- close to horizontal by mask principal orientation.
+被过滤的目标不会进入聚类和计数，但会写入 `filtered_instances`，并带有：
 
-Filtered detections are still written to `filtered_instances` with
-`filter_reason: top_horizontal_display_sign` for debugging.
+```json
+"filter_reason": "top_horizontal_display_sign"
+```
 
-## API
+这样后续可以检查过滤是否合理。
 
-Start the service:
+## API 服务
+
+启动服务：
 
 ```bash
 uvicorn occlusion.api:app --host 0.0.0.0 --port 8001
 ```
 
-Useful environment variables:
+常用环境变量：
 
 ```bash
 OCCLUSION_WEIGHTS=/path/to/best.pt
@@ -197,25 +189,24 @@ OCCLUSION_IOU=0.5
 OCCLUSION_SKIP_DEPTH=true
 ```
 
-Endpoints:
+接口：
 
 - `POST /api/v1/occlusion/count`
 - `POST /api/v1/occlusion/analyze`
-- Compatibility aliases:
+- 兼容接口：
   - `POST /api/occlusion/count`
   - `POST /api/occlusion/analyze`
 
-Example:
+调用示例：
 
 ```bash
 curl -X POST "http://127.0.0.1:8001/api/v1/occlusion/analyze" \
   -F "images=@/path/to/image.jpg"
 ```
 
-## Notes
+## 注意事项
 
-- Use UTF-8 for `data.yaml` so Chinese class names are preserved in JSON output.
-- The visualization renderer uses Pillow and Windows Chinese fonts when
-  available, so Chinese labels can be drawn on output images.
-- `__pycache__`, virtual environments, runs, outputs, and model weights are
-  ignored by Git.
+- `data.yaml` 必须使用 UTF-8 编码，避免中文类别名乱码。
+- 可视化标签使用 Pillow 和系统中文字体绘制，支持中文显示。
+- `__pycache__`、虚拟环境、训练输出、推理输出和模型权重已在 `.gitignore` 中忽略。
+- 当前过滤规则是针对“上方横向招牌”的启发式规则，如果后续出现特殊商品形态，需要结合数据继续调整阈值或改为类别/区域约束。
